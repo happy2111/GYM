@@ -60,14 +60,14 @@ const validateLogin = [
   handleValidationErrors
 ];
 
-const validateRefreshToken = [
-  body('refreshToken')
-    .notEmpty()
-    .withMessage('Refresh token is required'),
-
-  handleValidationErrors
-];
-
+const validateRefreshToken = (req, res, next) => {
+  const token = req.cookies.refreshToken;
+  if (!token) {
+    return res.status(401).json({ error: "Refresh token is required" });
+  }
+  req.refreshToken = token; // прикрепляем к req
+  next();
+};
 module.exports = {
   validateRegister,
   validateLogin,

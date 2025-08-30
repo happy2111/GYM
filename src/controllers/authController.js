@@ -1,105 +1,133 @@
 const User = require('../models/User');
 const RefreshToken = require('../models/RefreshToken');
-const { generateTokens } = require('../utils/jwt');
+const {generateTokens} = require('../utils/jwt');
 
 class AuthController {
   // Regular registration
   static async register(req, res) {
     try {
-      const { name, phone, email, role, password } = req.body;
+      const {
+        name,
+        phone,
+        email,
+        role,
+        password,
+        gender,
+        dateOfBirth
+      } = req.body;
 
-      // Check if user already exists
+      // Проверяем, существует ли пользователь
       const existingUser = await User.findByEmail(email);
       if (existingUser) {
         return res.status(409).json({
-          error: 'User with this email already exists'
+          error: "User with this email already exists"
         });
       }
 
-      // Create new user
+      // Создаём пользователя
       const user = await User.create({
         name,
         phone,
         email,
         role,
-        password
+        password,
+        gender: gender ?? null,
+        dateOfBirth: dateOfBirth ?? null
       });
 
-      // Generate tokens
-      const { accessToken, refreshToken } = await generateTokens(user);
+      // Генерируем токены
+      const {accessToken, refreshToken} = await generateTokens(user);
 
-      // Save refresh token to database
-      await RefreshToken.create(user.id, refreshToken);
+      // Удаляем старые refresh токены (на всякий случай)
+      await RefreshToken.deleteByUserId(user.id);
 
-      res.status(201).json({
-        message: 'User registered successfully',
+      // Сохраняем новый refresh в базе
+      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      const device = req.body.device || null; // можно присылать с фронта
+
+      // Сохраняем новый refresh в базе
+      await RefreshToken.create(user.id, refreshToken, ip, userAgent, device);
+
+      // Устанавливаем refresh в HttpOnly cookie
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 дней
+      });
+
+      // Возвращаем только accessToken + данные пользователя
+      return res.status(201).json({
+        success: true,
+        message: "Registration successful",
         user: {
           id: user.id,
           name: user.name,
           phone: user.phone,
           email: user.email,
           role: user.role,
-          createdAt: user.created_at
+          gender: user.gender,
+          dateOfBirth: user.dateOfBirth
         },
-        tokens: {
-          accessToken,
-          refreshToken
-        }
+        accessToken
       });
     } catch (error) {
-      console.error('Registration error:', error);
-
-      if (error.code === '23505') { // PostgreSQL unique violation
-        return res.status(409).json({
-          error: 'User with this email already exists'
-        });
-      }
-
-      res.status(500).json({
-        error: 'Internal server error'
-      });
+      console.error("Register error:", error);
+      return res.status(500).json({error: "Registration failed"});
     }
   }
+
 
   // Regular login
   static async login(req, res) {
     try {
-      const { email, password } = req.body;
+      const {email, password} = req.body;
 
-      // Find user by email
+      // Найти юзера
       const user = await User.findByEmail(email);
       if (!user) {
-        return res.status(401).json({
-          error: 'Invalid email or password'
-        });
+        return res.status(401).json({error: "Invalid email or password"});
       }
 
-      // Check if user has a password (not a Google-only account)
+      // Проверка, что у юзера есть пароль (а не Google-only аккаунт)
       if (!user.password_hash) {
         return res.status(401).json({
-          error: 'This account was created with Google. Please use Google sign-in.'
+          error: "This account was created with Google. Please use Google sign-in."
         });
       }
 
-      // Validate password
+      // Проверить пароль
       const isValidPassword = await User.validatePassword(password, user.password_hash);
       if (!isValidPassword) {
-        return res.status(401).json({
-          error: 'Invalid email or password'
-        });
+        return res.status(401).json({error: "Invalid email or password"});
       }
 
-      // Generate tokens
-      const { accessToken, refreshToken } = await generateTokens(user);
+      // Генерация токенов
+      const {accessToken, refreshToken} = await generateTokens(user);
 
-      // Clean up old refresh tokens for this user
+      // Удаляем старые refresh для этого юзера
       await RefreshToken.deleteByUserId(user.id);
 
-      // Save new refresh token
-      await RefreshToken.create(user.id, refreshToken);
+      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      const device = req.body.device || null; // можно присылать с фронта
 
+      // Сохраняем новый refresh в базе
+      await RefreshToken.create(user.id, refreshToken, ip, userAgent, device);
+
+      // Устанавливаем refresh в HttpOnly куку
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production", // true если https
+        sameSite: "lax", // можно "strict" если только один домен
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 дней
+      });
+
+      // Возвращаем только access + user
       res.json({
-        message: 'Login successful',
+        success: true,
+        message: "Login successful",
         user: {
           id: user.id,
           name: user.name,
@@ -107,67 +135,67 @@ class AuthController {
           email: user.email,
           role: user.role
         },
-        tokens: {
-          accessToken,
-          refreshToken
-        }
+        accessToken // refresh уже в куке
       });
     } catch (error) {
-      console.error('Login error:', error);
-      res.status(500).json({
-        error: 'Internal server error'
-      });
+      console.error("Login error:", error);
+      res.status(500).json({error: "Internal server error"});
     }
   }
+
 
   // Refresh access token
   static async refresh(req, res) {
     try {
-      const { refreshToken } = req.body;
+      const refreshToken = req.refreshToken; // берём из middleware
 
-      // Find refresh token in database
       const tokenData = await RefreshToken.findByToken(refreshToken);
       if (!tokenData) {
-        return res.status(401).json({
-          error: 'Invalid or expired refresh token'
-        });
+        return res.status(401).json({ error: "Invalid or expired refresh token" });
       }
 
-      // Generate new tokens
       const user = {
         id: tokenData.user_id,
         name: tokenData.name,
         email: tokenData.email,
-        role: tokenData.role
+        role: tokenData.role,
       };
 
-      const { accessToken, refreshToken: newRefreshToken } = await generateTokens(user);
+      const {
+        accessToken,
+        refreshToken: newRefreshToken
+      } = await generateTokens(user);
 
-      // Delete old refresh token
+      // Удаляем старый
       await RefreshToken.deleteByToken(refreshToken);
 
-      // Save new refresh token
-      await RefreshToken.create(user.id, newRefreshToken);
+      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      const device = req.body.device || null;
 
-      res.json({
-        message: 'Tokens refreshed successfully',
-        tokens: {
-          accessToken,
-          refreshToken: newRefreshToken
-        }
+      // Сохраняем новый refresh в базе
+      await RefreshToken.create(user.id, newRefreshToken, ip, userAgent, device);
+
+      // Ставим новый refresh cookie
+      res.cookie("refreshToken", newRefreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 30 * 24 * 60 * 60 * 1000, // 30 дней
       });
+
+      res.json({ accessToken, user });
     } catch (error) {
-      console.error('Refresh token error:', error);
-      res.status(500).json({
-        error: 'Internal server error'
-      });
+      console.error("Refresh token error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   }
+
 
   // Logout
   static async logout(req, res) {
     try {
-      const { refreshToken } = req.body;
+      const {refreshToken} = req.body;
 
       if (refreshToken) {
         await RefreshToken.deleteByToken(refreshToken);
@@ -197,23 +225,36 @@ class AuthController {
       const user = req.user;
 
       // Generate tokens
-      const { accessToken, refreshToken } = await generateTokens(user);
+      const {accessToken, refreshToken} = await generateTokens(user);
 
       // Clean up old refresh tokens
       await RefreshToken.deleteByUserId(user.id);
-
       // Save refresh token
-      await RefreshToken.create(user.id, refreshToken);
+      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+      const userAgent = req.headers['user-agent'] || 'unknown';
+      const device = req.body.device || null; // можно присылать с фронта
 
-      // Redirect to frontend with tokens
-      const clientUrl = process.env.CLIENT_URL || 'http://localhost:3001';
-      res.redirect(`${clientUrl}/auth/callback?token=${accessToken}&refreshToken=${refreshToken}`);
+      // Сохраняем новый refresh в базе
+      await RefreshToken.create(user.id, refreshToken, ip, userAgent, device);
+
+      // Set refresh token in HttpOnly cookie
+      res.cookie("refreshToken", refreshToken, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+      });
+
+      // Redirect to frontend (no token in URL!)
+      const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+      res.redirect(`${clientUrl}/auth/callback`);
     } catch (error) {
       console.error('Google callback error:', error);
       const clientUrl = process.env.CLIENT_URL || 'http://localhost:3001';
       res.redirect(`${clientUrl}/auth/error`);
     }
   }
+
 
   // Get current user profile
   static async getProfile(req, res) {
@@ -230,6 +271,26 @@ class AuthController {
       });
     } catch (error) {
       console.error('Get profile error:', error);
+      res.status(500).json({
+        error: 'Internal server error'
+      });
+    }
+  }
+
+  // Check email
+  static async checkEmail(req, res) {
+    try {
+      const {email} = req.body;
+      const user = await User.findByEmail(email);
+      if (!user) {
+        return res.json({exists: false});
+      }
+      res.json({
+        exists: true,
+        // hasPassword: !!user.password_hash
+      });
+    } catch (error) {
+      console.error('Check email error:', error);
       res.status(500).json({
         error: 'Internal server error'
       });

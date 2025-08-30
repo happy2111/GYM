@@ -2,25 +2,34 @@ const pool = require('../config/database');
 const { v4: uuidv4 } = require('uuid');
 
 class RefreshToken {
-  static async create(userId, token, expiresIn = '7d') {
+  static async create(userId, token, ip, userAgent, device, expiresIn = '15d') {
     try {
-      // Calculate expiration date
       const expiresAt = new Date();
       const days = parseInt(expiresIn.replace('d', ''));
       expiresAt.setDate(expiresAt.getDate() + days);
 
       const query = `
-        INSERT INTO refresh_tokens (user_id, token, expires_at)
-        VALUES ($1, $2, $3)
-        RETURNING id, token, expires_at
+          INSERT INTO refresh_tokens (user_id, token, ip, user_agent, device, expires_at)
+          VALUES ($1, $2, $3, $4, $5, $6)
+              RETURNING id, token, expires_at, ip, user_agent, device
       `;
 
-      const result = await pool.query(query, [userId, token, expiresAt]);
+      const result = await pool.query(query, [
+        userId,
+        token,
+        ip,
+        userAgent,
+        device,
+        expiresAt
+      ]);
+
       return result.rows[0];
     } catch (error) {
       throw error;
     }
   }
+
+
 
   static async findByToken(token) {
     try {

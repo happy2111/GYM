@@ -1,13 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const session = require('express-session');
+const cookieParser = require("cookie-parser");
 const passport = require('./config/passport');
 const routes = require('./routes');
-const { errorHandler, notFoundHandler } = require('./middlewares/errorHandler');
-const { generalLimiter, helmetConfig, authLimiter } = require('./middlewares/security');
+const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
+const { generalLimiter, helmetConfig, authLimiter } = require('./middleware/security');
 
 const app = express();
+app.use(cookieParser());
 const PORT = process.env.PORT || 3000;
 
 // Security middleware
@@ -25,21 +26,8 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Session configuration for Google OAuth
-app.use(session({
-  secret: process.env.SESSION_SECRET || 'your-session-secret',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    secure: process.env.NODE_ENV === 'production',
-    httpOnly: true,
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
-  }
-}));
-
-// Passport middleware
+// Passport middleware (без сессий)
 app.use(passport.initialize());
-app.use(passport.session());
 
 // Apply auth rate limiting to authentication routes
 app.use('/api/auth/login', authLimiter);
